@@ -27,13 +27,20 @@
     stepIndicator: document.getElementById('step-indicator'),
     restoreHint: document.getElementById('restore-hint'),
     exportBtn: document.getElementById('export-btn'),
+    pinBtn: document.getElementById('pin-btn'),
+    clearBaselineBtn: document.getElementById('clear-baseline-btn'),
     tabOrder: document.getElementById('tab-order'),
     tabExcluded: document.getElementById('tab-excluded'),
+    tabBaseline: document.getElementById('tab-baseline'),
     orderList: document.getElementById('order-list'),
     orderCount: document.getElementById('order-count'),
     excludedPanel: document.getElementById('excluded-panel'),
     excludedList: document.getElementById('excluded-list'),
     excludedCount: document.getElementById('excluded-count'),
+    baselinePanel: document.getElementById('baseline-panel'),
+    baselineList: document.getElementById('baseline-list'),
+    baselineCount: document.getElementById('baseline-count'),
+    baselineMetaText: document.getElementById('baseline-meta-text'),
     diagnosticsList: document.getElementById('diagnostics-list')
   };
 
@@ -45,7 +52,9 @@
     stats: null,
     currentStep: -1,     // 当前高亮在顺序中的下标
     restoreSelector: null, // 待恢复的稳定选择器
-    routeTimer: null     // 路线响应超时计时器
+    routeTimer: null,    // 路线响应超时计时器
+    baseline: null,      // 基线快照 {pinnedAt, htmlHash, cssHash, htmlLen, cssLen, stats, nodes}
+    diff: null           // 基线对比结果（FocusDiff.computeBaselineDiff 的返回值）
   };
 
   /* ---------------- 示例输入 ---------------- */
@@ -142,6 +151,19 @@
     els.status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
+  function setRestoreHint(text) {
+    els.restoreHint.textContent = text || '';
+  }
+
+  /** djb2 → 8 位十六进制摘要，仅用于基线元信息（标识输入版本，非加密用途） */
+  function hashText(str) {
+    var h = 5381;
+    for (var i = 0; i < str.length; i++) {
+      h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    }
+    return ('00000000' + h.toString(16)).slice(-8);
+  }
+
   function applyAndRecompute() {
     if (!state.analyzerSrc) return;
     // 记录当前高亮节点的稳定选择器，供重算后恢复位置
@@ -176,6 +198,8 @@
     } else if (d.type === 'highlighted') {
       state.currentStep = d.step;
       updateStepUI();
+    } else if (d.type === 'highlight-miss') {
+      setRestoreHint('差异项对应的节点（' + d.selector + '）在当前文档中找不到，无法高亮。');
     } else if (d.type === 'error') {
       clearTimeout(state.routeTimer);
       setStatus('分析脚本错误：' + d.message, 'err');
@@ -188,23 +212,38 @@
     state.diagnostics = payload.diagnostics || [];
     state.stats = payload.stats || null;
     state.currentStep = -1;
+    computeDiff();
     renderResults();
-    setStatus('已计算：' + state.order.length + ' 个可聚焦节点', 'ok');
+    renderBaselinePanel();
+    var extra = state.baseline ? ('；与基线相比 ' + diffSummaryPhrase(state.diff)) : '';
+    setStatus('已计算：' + state.order.length + ' 个可聚焦节点' + extra, 'ok');
 
     // 按稳定选择器恢复编辑前的位置
     if (state.restoreSelector) {
       var idx = state.order.indexOf(state.restoreSelector);
       if (idx >= 0) {
-        els.restoreHint.textContent = '已按稳定选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector;
+        setRestoreHint('已按稳定选择器恢复到位置 ' + (idx + 1) + '：' + state.restoreSelector);
         sendToFrame({ type: 'highlight', step: idx });
       } else {
-        els.restoreHint.textContent = '原节点（' + state.restoreSelector + '）已不在 Tab 顺序中，未恢复。';
+        setRestoreHint('原节点（' + state.restoreSelector + '）已不在 Tab 顺序中，未恢复。');
         updateStepUI();
       }
       state.restoreSelector = null;
     } else {
       updateStepUI();
     }
+  }
+
+  function diffSummaryPhrase(diff) {
+    if (!diff) return '';
+    var s = diff.summary;
+    var parts = [];
+    if (s.added) parts.push('新增 ' + s.added);
+    if (s.removed) parts.push('移除 ' + s.removed);
+    if (s.moved) parts.push('移位 ' + s.moved);
+    if (s.statusChanged) parts.push('状态变化 ' + s.statusChanged);
+    if (s.ambiguous) parts.push('歧义 ' + s.ambiguous);
+    return parts.length ? parts.join('、') : '无差异';
   }
 
   function sendToFrame(msg) {
@@ -221,7 +260,134 @@
     return null;
   }
 
+  /* ---------------- 基线对比 ---------------- */
+
+  /** 当前节点的快照（身份字段 + 状态 + 序号），钉基线与导出使用 */
+  function snapshotNodes() {
+    return state.entries.map(function (e) {
+      return {
+        selector: e.selector,
+        label: e.label,
+        tag: e.tag,
+        text: e.text || '',
+        status: e.status,
+        step: e.step == null ? null : e.step,
+        uid: e.uid || null,
+        fingerprint: e.fingerprint,
+        scope: e.scope,
+        path: e.path
+      };
+    });
+  }
+
+  function computeDiff() {
+    if (state.baseline && window.FocusDiff) {
+      state.diff = window.FocusDiff.computeBaselineDiff(state.baseline.nodes, snapshotNodes());
+    } else {
+      state.diff = null;
+    }
+  }
+
+  function pinBaseline() {
+    if (!state.entries.length) return;
+    state.baseline = {
+      pinnedAt: new Date().toISOString(),
+      htmlHash: hashText(els.html.value),
+      cssHash: hashText(els.css.value),
+      htmlLength: els.html.value.length,
+      cssLength: els.css.value.length,
+      stats: state.stats ? JSON.parse(JSON.stringify(state.stats)) : null,
+      nodes: snapshotNodes()
+    };
+    computeDiff();
+    renderBaselinePanel();
+    renderResults();
+    setStatus('已钉为基线：' + state.baseline.nodes.length + ' 个候选节点；后续重算将自动对比', 'ok');
+  }
+
+  function clearBaseline() {
+    state.baseline = null;
+    state.diff = null;
+    renderBaselinePanel();
+    renderResults();
+    setStatus('已清除基线', null);
+  }
+
+  /**
+   * 为顺序 / 排除列表建立 selector → 差异类型 的索引，用于行内徽标。
+   * 低置信（歧义）配对不在顺序列表标成 moved，避免错误信息。
+   */
+  function buildDiffIndex() {
+    var current = {};
+    var baseline = {};
+    var diff = state.diff;
+    if (!diff) return { current: current, baseline: baseline };
+
+    diff.moved.forEach(function (d) { current[d.selector] = 'moved'; });
+    diff.statusChanged.forEach(function (d) { current[d.selector] = 'status'; });
+    diff.added.forEach(function (n) { current[n.selector] = 'added'; });
+    diff.removed.forEach(function (n) { baseline[n.selector] = 'removed'; });
+    diff.ambiguous.forEach(function (a) {
+      if (a.kind === 'ambiguous-pair') {
+        current[a.current.selector] = 'ambiguous';
+        baseline[a.baseline.selector] = 'ambiguous';
+      } else if (a.side === 'current') {
+        current[a.node.selector] = 'ambiguous';
+      } else {
+        baseline[a.node.selector] = 'ambiguous';
+      }
+    });
+    return { current: current, baseline: baseline };
+  }
+
+  function findDiffForCurrent(selector) {
+    var diff = state.diff;
+    if (!diff) return null;
+    var i;
+    for (i = 0; i < diff.moved.length; i++) if (diff.moved[i].selector === selector) return diff.moved[i];
+    for (i = 0; i < diff.statusChanged.length; i++) if (diff.statusChanged[i].selector === selector) return diff.statusChanged[i];
+    for (i = 0; i < diff.added.length; i++) if (diff.added[i].selector === selector) return diff.added[i];
+    for (i = 0; i < diff.ambiguous.length; i++) {
+      var a = diff.ambiguous[i];
+      if ((a.kind === 'ambiguous-pair' && a.current.selector === selector) ||
+          (a.kind === 'ambiguous-node' && a.side === 'current' && a.node.selector === selector)) {
+        return a;
+      }
+    }
+    return null;
+  }
+
+  /** 差异项点击：联动 iframe 高亮（按选择器，覆盖被排除节点） */
+  function highlightDiffSelector(selector) {
+    setRestoreHint('');
+    sendToFrame({ type: 'highlight-selector', selector: selector });
+  }
+
+  var DIFF_LABELS = {
+    added: '新增',
+    removed: '已移除',
+    moved: '移位',
+    status: '状态变化',
+    ambiguous: '歧义'
+  };
+
+  /** 在顺序 / 排除列表行内追加差异徽标（移位带前后序号） */
+  function appendDiffBadge(container, kind, detail) {
+    if (!kind) return;
+    var badge = document.createElement('span');
+    badge.className = 'diff-badge ' + kind;
+    if (kind === 'moved' && detail) {
+      badge.textContent = DIFF_LABELS.moved + ' #' + detail.from + ' → #' + detail.to;
+    } else if (kind === 'status' && detail) {
+      badge.textContent = detail.fromStatusLabel + ' → ' + detail.toStatusLabel;
+    } else {
+      badge.textContent = DIFF_LABELS[kind] || kind;
+    }
+    container.appendChild(badge);
+  }
+
   function renderResults() {
+    var diffIndex = buildDiffIndex();
     // Tab 顺序列表
     els.orderList.innerHTML = '';
     els.orderCount.textContent = String(state.order.length);
@@ -236,7 +402,7 @@
       var li = document.createElement('li');
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'node-item';
+      btn.className = 'node-item diff-' + (diffIndex.current[selector] || 'none');
       btn.dataset.step = String(i);
 
       var line = document.createElement('span');
@@ -256,6 +422,7 @@
         b0.textContent = 'tabindex=0';
         line.appendChild(b0);
       }
+      appendDiffBadge(line, diffIndex.current[selector], findDiffForCurrent(selector));
       btn.appendChild(line);
 
       var sel = document.createElement('span');
@@ -293,7 +460,10 @@
     excluded.forEach(function (e) {
       var li = document.createElement('li');
       var box = document.createElement('div');
-      box.className = 'node-item';
+      box.className = 'node-item diff-' + (diffIndex.current[e.selector] || 'none');
+      box.setAttribute('role', 'button');
+      box.tabIndex = 0;
+      box.title = '点击在预览中高亮';
 
       var title = document.createElement('span');
       title.textContent = e.label + ' ';
@@ -302,6 +472,7 @@
       tag.textContent = e.status === 'programmatic' ? 'tabindex<0' :
         (e.status === 'excluded' ? '已排除' : '提示');
       title.appendChild(tag);
+      appendDiffBadge(title, diffIndex.current[e.selector], findDiffForCurrent(e.selector));
       box.appendChild(title);
 
       (e.reasons || []).forEach(function (r) {
@@ -321,6 +492,12 @@
       sel2.className = 'sel';
       sel2.textContent = e.selector;
       box.appendChild(sel2);
+
+      function locate() { highlightDiffSelector(e.selector); }
+      box.addEventListener('click', locate);
+      box.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); locate(); }
+      });
 
       li.appendChild(box);
       els.excludedList.appendChild(li);
@@ -351,6 +528,157 @@
     }
     els.prevBtn.disabled = total === 0;
     els.nextBtn.disabled = total === 0;
+  }
+
+  /* ---------------- 基线对比面板 ---------------- */
+
+  var STATUS_TAGS = {
+    ordered: '进入顺序',
+    excluded: '被排除',
+    programmatic: '仅脚本可聚焦',
+    'not-focusable': '非候选'
+  };
+  function statusTag(s) { return STATUS_TAGS[s] || (s == null ? '未知' : String(s)); }
+
+  function diffRow(kind, titleHtml, nodeForHighlight, selectorText) {
+    var li = document.createElement('li');
+    li.className = 'diff-row ' + kind;
+    var btn = document.createElement(nodeForHighlight ? 'button' : 'div');
+    btn.type = nodeForHighlight ? 'button' : '';
+    btn.className = 'node-item';
+
+    var head = document.createElement('span');
+    var tagEl = document.createElement('span');
+    tagEl.className = 'diff-badge ' + kind;
+    tagEl.textContent = DIFF_LABELS[kind] || kind;
+    head.appendChild(tagEl);
+    head.appendChild(document.createTextNode(' ' + titleHtml));
+    btn.appendChild(head);
+
+    if (selectorText) {
+      var sel = document.createElement('span');
+      sel.className = 'sel';
+      sel.textContent = selectorText;
+      btn.appendChild(sel);
+    }
+    if (nodeForHighlight) {
+      btn.addEventListener('click', function () { highlightDiffSelector(nodeForHighlight); });
+    }
+    li.appendChild(btn);
+    return li;
+  }
+
+  function renderBaselinePanel() {
+    els.baselineList.innerHTML = '';
+    var diff = state.diff;
+
+    if (!state.baseline) {
+      els.baselineMetaText.textContent =
+        '尚未钉入基线。分析完成后点击右上「📌 钉为基线」，此后每次重算都会与之对比。';
+      els.clearBaselineBtn.hidden = true;
+      els.baselineCount.textContent = '0';
+      var empty = document.createElement('li');
+      empty.className = 'empty-tip';
+      empty.textContent = '无基线。';
+      els.baselineList.appendChild(empty);
+      return;
+    }
+
+    var bl = state.baseline;
+    var pinned = new Date(bl.pinnedAt);
+    els.baselineMetaText.textContent =
+      '基线钉于 ' + pinned.toLocaleString() +
+      '（HTML#' + bl.htmlHash + ' / ' + bl.htmlLength + ' 字符，CSS#' + bl.cssHash + ' / ' + bl.cssLength +
+      ' 字符，' + bl.nodes.length + ' 个候选节点，其中 ' +
+      (bl.stats ? bl.stats.ordered : '?') + ' 个进入 Tab 顺序）';
+    els.clearBaselineBtn.hidden = false;
+
+    if (!diff) {
+      els.baselineCount.textContent = '0';
+      var loading = document.createElement('li');
+      loading.className = 'empty-tip';
+      loading.textContent = '等待对比结果…';
+      els.baselineList.appendChild(loading);
+      return;
+    }
+
+    var s = diff.summary;
+    var totalFlags = s.added + s.removed + s.moved + s.statusChanged + s.ambiguous;
+    els.baselineCount.textContent = String(totalFlags);
+
+    // 汇总条
+    var sum = document.createElement('li');
+    sum.className = 'diff-summary';
+    sum.textContent =
+      '高置信匹配 ' + s.matchedHigh + ' / 低置信 ' + s.matchedLow +
+      '（id ' + s.methodCounts.id + ' · 指纹 ' + s.methodCounts.fingerprint +
+      ' · 路径 ' + s.methodCounts.path + ' · 包裹 ' + s.methodCounts.suffix + '）；' +
+      '新增 ' + s.added + '，移除 ' + s.removed + '，移位 ' + s.moved +
+      '，状态变化 ' + s.statusChanged + '，未变化 ' + s.unchanged +
+      '，歧义 ' + s.ambiguous;
+    els.baselineList.appendChild(sum);
+
+    diff.added.forEach(function (n) {
+      els.baselineList.appendChild(diffRow(
+        'added', n.label + '（' + statusTag(n.status) + (n.step ? '，序号 #' + n.step : '') + '）',
+        n.selector, n.selector
+      ));
+    });
+
+    diff.removed.forEach(function (n) {
+      els.baselineList.appendChild(diffRow(
+        'removed', n.label + '（基线：' + statusTag(n.status) + (n.step ? '，序号 #' + n.step : '') + '）',
+        n.selector, n.selector
+      ));
+    });
+
+    diff.moved.forEach(function (d) {
+      els.baselineList.appendChild(diffRow(
+        'moved', d.label + '：序号 #' + d.from + ' → #' + d.to,
+        d.selector, d.selector
+      ));
+    });
+
+    diff.statusChanged.forEach(function (d) {
+      var extra = d.fromStatus === 'ordered' || d.toStatus === 'ordered'
+        ? '（序号 ' + (d.fromStep ? '#' + d.fromStep : '—') + ' → ' + (d.toStep ? '#' + d.toStep : '—') + '）'
+        : '';
+      els.baselineList.appendChild(diffRow(
+        'status', d.label + '：' + d.fromStatusLabel + ' → ' + d.toStatusLabel + extra,
+        d.selector, d.selector
+      ));
+    });
+
+    diff.ambiguous.forEach(function (a) {
+      var li;
+      if (a.kind === 'ambiguous-pair') {
+        li = diffRow(
+          'ambiguous',
+          '未匹配（配对存疑）：基线 ' + a.baseline.label +
+            (a.baseline.step ? ' #' + a.baseline.step : '') +
+            ' ↔ 当前 ' + a.current.label + (a.current.step ? ' #' + a.current.step : '') +
+            ' — ' + a.reason,
+          a.current.selector, a.current.selector
+        );
+      } else {
+        var n = a.node;
+        li = diffRow(
+          'ambiguous',
+          '未匹配（' + (a.side === 'baseline' ? '基线侧' : '当前侧') + '）：' + n.label +
+            (n.step ? ' #' + n.step : '') + ' — ' + a.reason,
+          a.side === 'current' ? n.selector : null,
+          n.selector
+        );
+      }
+      els.baselineList.appendChild(li);
+    });
+
+    if (s.unchanged > 0) {
+      var ok = document.createElement('li');
+      ok.className = 'diff-unchanged';
+      ok.textContent = '其余 ' + s.unchanged + ' 个节点匹配且无变化。';
+      els.baselineList.appendChild(ok);
+    }
   }
 
   /* ---------------- 步进（Tab / Shift+Tab） ---------------- */
@@ -411,10 +739,35 @@
           step: e.step,
           tabIndex: e.tabIndex,
           domIndex: e.domIndex,
+          uid: e.uid || null,
+          fingerprint: e.fingerprint,
+          scope: e.scope,
+          path: e.path,
           reasons: (e.reasons || []).map(function (r) { return { code: r.code, message: r.message }; }),
           warnings: (e.warnings || []).map(function (w) { return { code: w.code, message: w.message }; })
         };
       }),
+      baseline: state.baseline ? {
+        pinnedAt: state.baseline.pinnedAt,
+        htmlHash: state.baseline.htmlHash,
+        cssHash: state.baseline.cssHash,
+        htmlLength: state.baseline.htmlLength,
+        cssLength: state.baseline.cssLength,
+        stats: state.baseline.stats,
+        nodeCount: state.baseline.nodes.length,
+        nodes: state.baseline.nodes
+      } : null,
+      baselineComparison: state.diff ? {
+        summary: state.diff.summary,
+        matches: state.diff.matches,
+        diff: {
+          added: state.diff.added,
+          removed: state.diff.removed,
+          moved: state.diff.moved,
+          statusChanged: state.diff.statusChanged,
+          ambiguous: state.diff.ambiguous
+        }
+      } : null,
       diagnostics: state.diagnostics
     };
   }
@@ -447,15 +800,24 @@
 
   function switchTab(which) {
     var isOrder = which === 'order';
+    var isExcluded = which === 'excluded';
+    var isBaseline = which === 'baseline';
     els.tabOrder.classList.toggle('active', isOrder);
-    els.tabExcluded.classList.toggle('active', !isOrder);
+    els.tabExcluded.classList.toggle('active', isExcluded);
+    els.tabBaseline.classList.toggle('active', isBaseline);
     els.tabOrder.setAttribute('aria-selected', String(isOrder));
-    els.tabExcluded.setAttribute('aria-selected', String(!isOrder));
+    els.tabExcluded.setAttribute('aria-selected', String(isExcluded));
+    els.tabBaseline.setAttribute('aria-selected', String(isBaseline));
     els.orderList.hidden = !isOrder;
-    els.excludedPanel.hidden = isOrder;
+    els.excludedPanel.hidden = !isExcluded;
+    els.baselinePanel.hidden = !isBaseline;
   }
   els.tabOrder.addEventListener('click', function () { switchTab('order'); });
   els.tabExcluded.addEventListener('click', function () { switchTab('excluded'); });
+  els.tabBaseline.addEventListener('click', function () { switchTab('baseline'); });
+
+  els.pinBtn.addEventListener('click', pinBaseline);
+  els.clearBaselineBtn.addEventListener('click', clearBaseline);
 
   /* ---------------- 启动 ---------------- */
 

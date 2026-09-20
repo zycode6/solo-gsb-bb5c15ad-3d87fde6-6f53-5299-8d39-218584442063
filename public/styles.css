@@ -214,3 +214,67 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
 .diag.warn { color: var(--warn); }
 .diag.info { color: var(--muted); }
 .empty-tip { color: var(--muted); font-size: 12.5px; padding: 8px 2px; }
+
+/* ---------------- 基线对比 ---------------- */
+
+.btn.small { padding: 4px 9px; font-size: 12px; }
+
+.baseline-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.baseline-meta {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.baseline-meta-text { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.baseline-list {
+  flex: 1;
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+}
+.diff-summary {
+  margin: 4px 0 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.diff-unchanged { color: var(--ok); font-size: 12px; padding: 6px 2px; }
+
+/* 行内与差异面板共用的徽标 */
+.diff-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  background: #22304d;
+  color: var(--accent-2);
+  white-space: nowrap;
+}
+.diff-badge.added { background: rgba(52, 211, 153, .16); color: var(--ok); }
+.diff-badge.removed { background: #3a2333; color: var(--accent); }
+.diff-badge.moved { background: rgba(79, 140, 255, .16); color: var(--accent-2); }
+.diff-badge.status { background: #3d2b12; color: var(--warn); }
+.diff-badge.ambiguous { background: rgba(176, 131, 240, .16); color: #c3a4f5; }
+
+/* 顺序 / 排除列表行的左侧色条 */
+.node-item.diff-added { border-left: 3px solid var(--ok); }
+.node-item.diff-removed { border-left: 3px solid var(--accent); }
+.node-item.diff-moved { border-left: 3px solid var(--accent-2); }
+.node-item.diff-status { border-left: 3px solid var(--warn); }
+.node-item.diff-ambiguous { border-left: 3px solid #b083f0; }
+
+/* 差异面板中整行的悬停反馈（点击联动高亮） */
+.diff-row .node-item { cursor: pointer; }
+.diff-row.removed .node-item,
+.diff-row.ambiguous .node-item { cursor: pointer; }
+.diff-row .node-item:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }

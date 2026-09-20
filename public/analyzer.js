@@ -328,6 +328,88 @@
     return { css: css, text: text };
   }
 
+  /* ---- 节点身份（供基线对比，避免仅凭 nth-of-type 误判） ---- */
+
+  /** 取元素 id；仅当 id 在文档内唯一时才作为稳定身份，重复 id 返回 null */
+  function uniqueId(el) {
+    if (!el.id) return null;
+    var byId = '#' + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id);
+    try {
+      if (document.querySelectorAll(byId).length === 1) return el.id;
+    } catch (err) { /* 非法 id：不可作为身份 */ }
+    return null;
+  }
+
+  /**
+   * 完整结构路径：html/body/.../tag:nth-of-type 序号（始终带序号）。
+   * 用于同指纹分组内部决胜；不单独作为节点身份（兄弟插入会使序号平移）。
+   */
+  function nodePath(el) {
+    var parts = [];
+    var node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      var seg = node.tagName.toLowerCase();
+      var parent = node.parentElement;
+      var index = 1;
+      if (parent) {
+        index = 0;
+        for (var i = 0; i < parent.children.length; i++) {
+          if (parent.children[i].tagName === node.tagName) index++;
+          if (parent.children[i] === node) break;
+        }
+      }
+      parts.unshift(seg + ':' + index);
+      node = parent;
+    }
+    return parts.join('/');
+  }
+
+  /** 祖先 id 链（自外向内）：圈定同指纹节点的比较范围 */
+  function scopePath(el) {
+    var ids = [];
+    var node = el.parentElement;
+    while (node && node.nodeType === 1) {
+      if (node.id) ids.unshift(node.id);
+      node = node.parentElement;
+    }
+    return ids.join('>');
+  }
+
+  // 参与指纹的语义属性（不随 tabindex / disabled 等状态变化，
+  // 否则状态切换会被误判成「换了一个节点」）
+  var FP_ATTRS = [
+    'type', 'role', 'name', 'href', 'aria-label', 'aria-labelledby',
+    'for', 'alt', 'title', 'rel', 'placeholder', 'contenteditable'
+  ];
+
+  /** 结构 / 属性指纹：标签 + 语义属性 + 排序后的 class + 归一化文本 */
+  function fingerprint(el) {
+    var parts = ['tag=' + el.tagName.toLowerCase()];
+    for (var i = 0; i < FP_ATTRS.length; i++) {
+      if (el.hasAttribute(FP_ATTRS[i])) {
+        parts.push(FP_ATTRS[i] + '=' + String(el.getAttribute(FP_ATTRS[i]) || '').trim().slice(0, 120));
+      }
+    }
+    if (el.classList && el.classList.length) {
+      var classes = Array.prototype.slice.call(el.classList).filter(Boolean).sort();
+      parts.push('class=' + classes.join('.'));
+    }
+    var text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (text) parts.push('text=' + text);
+    return parts.join('|');
+  }
+
+  /** 一次性计算节点身份四元组 */
+  function buildIdentity(el) {
+    return {
+      uid: uniqueId(el),
+      fingerprint: fingerprint(el),
+      scope: scopePath(el),
+      path: nodePath(el)
+    };
+  }
+
+
   /**
    * 生成稳定选择器：优先唯一 #id，否则用 tag + :nth-of-type 逐级回溯。
    * 用于编辑重算后「恢复当前位置」。
@@ -394,6 +476,7 @@
         // 非候选元素：仅当有值得报告的警告时才记录（如非法 tabindex）
         if (nodeWarnings.length > 0) {
           var d0 = describe(el);
+          var id0 = buildIdentity(el);
           entries.push({
             el: el,
             status: 'not-focusable',
@@ -401,6 +484,10 @@
             label: d0.css,
             text: d0.text,
             selector: stableSelector(el),
+            uid: id0.uid,
+            fingerprint: id0.fingerprint,
+            scope: id0.scope,
+            path: id0.path,
             tabIndex: null,
             domIndex: i,
             interactive: false,
@@ -420,6 +507,7 @@
       else status = 'ordered';
 
       var d = describe(el);
+      var idInfo = buildIdentity(el);
       entries.push({
         el: el,
         status: status,
@@ -427,6 +515,10 @@
         label: d.css,
         text: d.text,
         selector: stableSelector(el),
+        uid: idInfo.uid,
+        fingerprint: idInfo.fingerprint,
+        scope: idInfo.scope,
+        path: idInfo.path,
         tabIndex: effective,
         domIndex: i,
         interactive: natural,
@@ -446,6 +538,10 @@
         label: e.label,
         text: e.text,
         selector: e.selector,
+        uid: e.uid || null,
+        fingerprint: e.fingerprint,
+        scope: e.scope,
+        path: e.path,
         tabIndex: e.tabIndex,
         domIndex: e.domIndex,
         interactive: e.interactive,
@@ -514,11 +610,8 @@
     (document.body || document.documentElement).appendChild(overlay);
   }
 
-  function highlightStep(step) {
-    if (step < 0 || step >= order.length) return;
-    var entry = entries[order[step]];
-    var el = entry.el;
-    if (!el || !el.isConnected) return;
+  /** 在指定元素上绘制高亮框 */
+  function drawOverlay(el, caption) {
     ensureOverlay();
     try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
     var r = el.getBoundingClientRect();
@@ -527,9 +620,46 @@
     overlay.style.top = (r.top + window.pageYOffset - 3) + 'px';
     overlay.style.width = Math.max(r.width, 4) + 6 + 'px';
     overlay.style.height = Math.max(r.height, 4) + 6 + 'px';
-    badge.textContent = 'Tab ' + (step + 1) + ' / ' + order.length;
+    badge.textContent = caption;
+  }
+
+  function highlightStep(step) {
+    if (step < 0 || step >= order.length) return;
+    var entry = entries[order[step]];
+    var el = entry.el;
+    if (!el || !el.isConnected) return;
+    drawOverlay(el, 'Tab ' + (step + 1) + ' / ' + order.length);
     currentStep = step;
     post({ type: 'highlighted', step: step, selector: entry.selector, label: entry.label });
+  }
+
+  /**
+   * 按稳定选择器高亮任意已知节点（含被排除 / 仅编程聚焦节点），
+   * 供父页面「基线对比」差异项点击联动；找不到时回传 highlight-miss。
+   */
+  function highlightBySelector(selector) {
+    var entry = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].selector === selector) { entry = entries[i]; break; }
+    }
+    var el = entry && entry.el;
+    if (!el || !el.isConnected) {
+      try { el = document.querySelector(selector); } catch (e) { el = null; }
+    }
+    if (el && el.nodeType === 1 && el.isConnected) {
+      var pos = -1;
+      for (var s = 0; s < order.length; s++) {
+        if (entries[order[s]] && entries[order[s]].selector === selector) { pos = s; break; }
+      }
+      var caption = pos >= 0
+        ? 'Tab ' + (pos + 1) + ' / ' + order.length
+        : (entry ? '状态：' + entry.status : '定位');
+      drawOverlay(el, caption);
+      currentStep = pos; // -1 表示不在当前 Tab 顺序中（如被排除节点）
+      post({ type: 'highlighted', step: pos, selector: selector, label: entry ? entry.label : null });
+    } else {
+      post({ type: 'highlight-miss', selector: selector });
+    }
   }
 
   function clearHighlight() {
@@ -544,6 +674,8 @@
     if (d.target !== SOURCE) return;
     if (d.type === 'highlight') {
       highlightStep(d.step);
+    } else if (d.type === 'highlight-selector') {
+      highlightBySelector(d.selector);
     } else if (d.type === 'clear') {
       clearHighlight();
     } else if (d.type === 'recompute') {

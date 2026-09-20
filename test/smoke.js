@@ -33,6 +33,21 @@ async function check(name, fn) {
     if (!body.includes('computeOrder')) throw new Error('分析脚本内容异常');
   });
 
+  await check('GET /diff.js 可加载（基线对比引擎）', async () => {
+    const res = await fetch(BASE + '/diff.js');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const body = await res.text();
+    if (!body.includes('computeBaselineDiff')) throw new Error('对比引擎内容异常');
+  });
+
+  await check('页面包含基线对比标签与钉基线按钮', async () => {
+    const res = await fetch(BASE + '/');
+    const body = await res.text();
+    if (!body.includes('tab-baseline')) throw new Error('缺少基线对比标签');
+    if (!body.includes('pin-btn')) throw new Error('缺少钉为基线按钮');
+    if (!body.includes('/diff.js')) throw new Error('未引入 diff.js');
+  });
+
   await check('GET /api/health', async () => {
     const res = await fetch(BASE + '/api/health');
     if (!res.ok) throw new Error('status ' + res.status);
@@ -44,7 +59,10 @@ async function check(name, fn) {
     const res = await fetch(BASE + '/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tool: 'focus-route-lab', order: [], nodes: [], diagnostics: [] })
+      body: JSON.stringify({
+        tool: 'focus-route-lab', order: [], nodes: [], diagnostics: [],
+        baseline: null, baselineComparison: null
+      })
     });
     if (!res.ok) throw new Error('status ' + res.status);
     const cd = res.headers.get('content-disposition') || '';
