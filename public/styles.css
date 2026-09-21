@@ -214,3 +214,86 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
 .diag.warn { color: var(--warn); }
 .diag.info { color: var(--muted); }
 .empty-tip { color: var(--muted); font-size: 12.5px; padding: 8px 2px; }
+
+/* ---------------- 基线对比 ---------------- */
+
+.baseline-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.baseline-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.baseline-meta { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+
+.diff-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.diff-chip {
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-family: var(--mono);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.diff-chip.added { color: var(--ok); }
+.diff-chip.removed { color: var(--accent); }
+.diff-chip.moved { color: var(--accent-2); }
+.diff-chip.status { color: var(--warn); }
+.diff-chip.unmatched { color: #c792ea; }
+
+.diff-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.diff-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.diff-item:hover { border-color: var(--accent-2); }
+.diff-item.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.diff-item.added { border-left-color: var(--ok); }
+.diff-item.removed { border-left-color: var(--accent); }
+.diff-item.moved { border-left-color: var(--accent-2); }
+.diff-item.status { border-left-color: var(--warn); }
+.diff-item.unmatched { border-left-color: #c792ea; }
+
+.type-badge {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  background: #22304d;
+  color: var(--accent-2);
+}
+.type-badge.added { background: #12352b; color: var(--ok); }
+.type-badge.removed { background: #3a2333; color: var(--accent); }
+.type-badge.moved { background: #22304d; color: var(--accent-2); }
+.type-badge.status { background: #3d2b12; color: var(--warn); }
+.type-badge.unmatched { background: #2d2440; color: #c792ea; }
+
+.diff-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.diff-item .sel { font-family: var(--mono); color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.diff-hint {
+  min-height: 18px;
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--accent-2);
+}

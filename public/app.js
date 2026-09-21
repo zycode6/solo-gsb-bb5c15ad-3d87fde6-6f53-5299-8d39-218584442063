@@ -7,7 +7,10 @@
  *     装入 sandbox="allow-scripts"（无 allow-same-origin）的 iframe；
  *  3. 通过 postMessage 接收焦点路线，渲染顺序列表与诊断；
  *  4. 步进高亮（Tab / Shift+Tab）；编辑重算后按稳定选择器恢复当前位置；
- *  5. 汇总报告经 POST /api/export 导出为 JSON 附件。
+ *  5. 基线对比（diff.js）：钉住当前结果为基线，重算后按节点身份
+ *     （唯一 id + 结构/属性指纹）匹配前后路线，展示新增 / 移除 / 移位 /
+ *     状态切换与未匹配项，点击差异项联动预览高亮；
+ *  6. 汇总报告（含基线摘要、匹配结果与差异）经 POST /api/export 导出为 JSON 附件。
  */
 (function () {
   'use strict';
@@ -34,7 +37,16 @@
     excludedPanel: document.getElementById('excluded-panel'),
     excludedList: document.getElementById('excluded-list'),
     excludedCount: document.getElementById('excluded-count'),
-    diagnosticsList: document.getElementById('diagnostics-list')
+    diagnosticsList: document.getElementById('diagnostics-list'),
+    tabBaseline: document.getElementById('tab-baseline'),
+    baselinePanel: document.getElementById('baseline-panel'),
+    baselineCount: document.getElementById('baseline-count'),
+    pinBaselineBtn: document.getElementById('pin-baseline-btn'),
+    clearBaselineBtn: document.getElementById('clear-baseline-btn'),
+    baselineMeta: document.getElementById('baseline-meta'),
+    diffSummary: document.getElementById('diff-summary'),
+    diffList: document.getElementById('diff-list'),
+    diffHint: document.getElementById('diff-hint')
   };
 
   var state = {
@@ -45,7 +57,9 @@
     stats: null,
     currentStep: -1,     // 当前高亮在顺序中的下标
     restoreSelector: null, // 待恢复的稳定选择器
-    routeTimer: null     // 路线响应超时计时器
+    routeTimer: null,    // 路线响应超时计时器
+    baseline: null,      // 已钉住的基线快照 { pinnedAt, stats, entries }
+    diff: null           // 最近一次基线对比结果（FocusDiff.diffRoutes 返回值）
   };
 
   /* ---------------- 示例输入 ---------------- */
@@ -176,6 +190,8 @@
     } else if (d.type === 'highlighted') {
       state.currentStep = d.step;
       updateStepUI();
+    } else if (d.type === 'highlight-miss') {
+      setDiffHint('未能在当前预览中定位该节点（可能刚被移除或选择器已变化）。');
     } else if (d.type === 'error') {
       clearTimeout(state.routeTimer);
       setStatus('分析脚本错误：' + d.message, 'err');
@@ -189,6 +205,7 @@
     state.stats = payload.stats || null;
     state.currentStep = -1;
     renderResults();
+    refreshDiff();
     setStatus('已计算：' + state.order.length + ' 个可聚焦节点', 'ok');
 
     // 按稳定选择器恢复编辑前的位置
@@ -353,6 +370,212 @@
     els.nextBtn.disabled = total === 0;
   }
 
+  /* ---------------- 基线对比 ---------------- */
+
+  var DIFF_TYPE_META = {
+    added: { label: '新增', cls: 'added' },
+    removed: { label: '移除', cls: 'removed' },
+    moved: { label: '移位', cls: 'moved' },
+    status: { label: '状态', cls: 'status' },
+    unmatched: { label: '未匹配', cls: 'unmatched' }
+  };
+
+  function setDiffHint(text) {
+    els.diffHint.textContent = text || '';
+  }
+
+  /** 当前结果的精简快照（与基线同构，供 FocusDiff 匹配） */
+  function currentSnapshot() {
+    return {
+      stats: state.stats,
+      entries: state.entries.map(function (e) {
+        return {
+          identity: e.identity || null,
+          selector: e.selector,
+          label: e.label,
+          text: e.text,
+          tag: e.tag,
+          status: e.status,
+          step: e.step,
+          tabIndex: e.tabIndex,
+          domIndex: e.domIndex
+        };
+      })
+    };
+  }
+
+  /** 有基线时，每次重算后自动对比并刷新面板 */
+  function refreshDiff() {
+    if (typeof FocusDiff === 'undefined') return;
+    state.diff = state.baseline ? FocusDiff.diffRoutes(state.baseline, currentSnapshot()) : null;
+    renderBaselinePanel();
+  }
+
+  function pinBaseline() {
+    if (typeof FocusDiff === 'undefined') return;
+    if (!state.stats) {
+      setDiffHint('尚无分析结果，无法钉为基线。');
+      return;
+    }
+    var snap = currentSnapshot();
+    state.baseline = {
+      pinnedAt: new Date().toISOString(),
+      stats: snap.stats,
+      entries: snap.entries
+    };
+    refreshDiff();
+    setDiffHint('已钉为基线（' + snap.entries.length + ' 个节点）。后续重算将自动与基线对比。');
+  }
+
+  function clearBaseline() {
+    state.baseline = null;
+    state.diff = null;
+    setDiffHint('');
+    renderBaselinePanel();
+  }
+
+  function formatTime(iso) {
+    try {
+      return new Date(iso).toLocaleString();
+    } catch (err) {
+      return iso;
+    }
+  }
+
+  /** 差异项的说明文字 */
+  function diffDetailText(item) {
+    switch (item.type) {
+      case 'added': {
+        var c = item.current;
+        return c.step ? '进入 Tab 顺序：第 ' + c.step + ' 位' : '新增节点（' + c.statusLabel + '）';
+      }
+      case 'removed': {
+        var b = item.baseline;
+        return (b.step ? '原第 ' + b.step + ' 位' : '原状态：' + b.statusLabel) + '，当前已不存在';
+      }
+      case 'moved':
+        return '第 ' + item.fromStep + ' 位 → 第 ' + item.toStep + ' 位';
+      case 'status': {
+        var from = item.fromStep ? item.fromStatusLabel + '（第 ' + item.fromStep + ' 位）' : item.fromStatusLabel;
+        var to = item.toStep ? item.toStatusLabel + '（第 ' + item.toStep + ' 位）' : item.toStatusLabel;
+        return from + ' → ' + to;
+      }
+      case 'unmatched':
+        return (item.side === 'baseline' ? '基线侧' : '当前侧') + '节点无法唯一确定对应关系：' +
+          (item.reason === 'ambiguous-uid'
+            ? '唯一 id 在一侧出现多次'
+            : '结构/属性指纹在两侧均不唯一（存在多个相同节点）');
+      default:
+        return '';
+    }
+  }
+
+  /** 点击差异项：联动当前预览高亮 */
+  function onDiffItemClick(item) {
+    var cur = item.current;
+    if (cur && cur.step) {
+      setDiffHint('');
+      sendToFrame({ type: 'highlight', step: cur.step - 1 }); // step 为 1 基序号
+    } else if (cur && cur.selector) {
+      setDiffHint('');
+      sendToFrame({ type: 'highlight-node', selector: cur.selector }); // 非顺序节点：虚线框
+    } else {
+      setDiffHint('「' + (item.label || '') + '」仅存在于基线中，当前预览没有可高亮的节点。');
+    }
+  }
+
+  function renderBaselinePanel() {
+    var hasBaseline = !!state.baseline;
+    els.clearBaselineBtn.hidden = !hasBaseline;
+    els.pinBaselineBtn.textContent = hasBaseline ? '📌 重新钉当前为基线' : '📌 钉当前为基线';
+    els.diffSummary.innerHTML = '';
+    els.diffList.innerHTML = '';
+
+    if (!hasBaseline || !state.diff) {
+      els.baselineMeta.textContent = '尚未固定基线。钉住当前分析结果后，后续重算将按节点身份（唯一 id + 结构/属性指纹）自动对比前后路线。';
+      els.baselineCount.textContent = '0';
+      var li0 = document.createElement('li');
+      li0.className = 'empty-tip';
+      li0.textContent = '暂无基线可对比。';
+      els.diffList.appendChild(li0);
+      return;
+    }
+
+    var d = state.diff;
+    var s = d.summary;
+    els.baselineMeta.textContent =
+      '基线钉于 ' + formatTime(d.baseline.pinnedAt) +
+      ' · 基线 ' + d.baseline.nodeCount + ' 节点 / ' + d.baseline.orderCount + ' 在顺序中' +
+      ' · 当前 ' + d.current.nodeCount + ' / ' + d.current.orderCount;
+
+    var total = s.added + s.removed + s.moved + s.statusChanged + s.unmatched;
+    els.baselineCount.textContent = String(total);
+
+    var chips = [
+      ['added', '+' + s.added + ' 新增'],
+      ['removed', '−' + s.removed + ' 移除'],
+      ['moved', '⇄' + s.moved + ' 移位'],
+      ['status', '⚠' + s.statusChanged + ' 状态'],
+      ['unmatched', '◆' + s.unmatched + ' 未匹配'],
+      ['unchanged', '=' + s.unchanged + ' 不变']
+    ];
+    chips.forEach(function (c) {
+      var chip = document.createElement('span');
+      chip.className = 'diff-chip ' + c[0];
+      chip.textContent = c[1];
+      els.diffSummary.appendChild(chip);
+    });
+
+    if (d.diffs.length === 0) {
+      var liE = document.createElement('li');
+      liE.className = 'empty-tip';
+      liE.textContent = '与基线一致，未发现差异。';
+      els.diffList.appendChild(liE);
+      return;
+    }
+
+    d.diffs.forEach(function (item) {
+      var meta = DIFF_TYPE_META[item.type] || { label: item.type, cls: '' };
+      var li = document.createElement('li');
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'diff-item ' + meta.cls;
+
+      var line = document.createElement('span');
+      var badge = document.createElement('span');
+      badge.className = 'type-badge ' + meta.cls;
+      badge.textContent = meta.label;
+      line.appendChild(badge);
+      line.appendChild(document.createTextNode(' ' + (item.label || '(未命名节点)')));
+      btn.appendChild(line);
+
+      var detail = document.createElement('span');
+      detail.className = 'diff-detail';
+      detail.textContent = diffDetailText(item);
+      btn.appendChild(detail);
+
+      var node = item.current || item.baseline;
+      if (node && node.selector) {
+        var sel = document.createElement('span');
+        sel.className = 'sel';
+        sel.textContent = node.selector;
+        btn.appendChild(sel);
+      }
+
+      btn.addEventListener('click', function () {
+        var all = els.diffList.querySelectorAll('.diff-item');
+        for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+        btn.classList.add('active');
+        onDiffItemClick(item);
+      });
+      li.appendChild(btn);
+      els.diffList.appendChild(li);
+    });
+  }
+
+  els.pinBaselineBtn.addEventListener('click', pinBaseline);
+  els.clearBaselineBtn.addEventListener('click', clearBaseline);
+
   /* ---------------- 步进（Tab / Shift+Tab） ---------------- */
 
   function stepNext() {
@@ -415,7 +638,15 @@
           warnings: (e.warnings || []).map(function (w) { return { code: w.code, message: w.message }; })
         };
       }),
-      diagnostics: state.diagnostics
+      diagnostics: state.diagnostics,
+      // 基线对比：基线摘要 + 匹配结果 + 差异（未钉基线时为 null）
+      baselineComparison: state.diff ? {
+        baseline: state.diff.baseline,
+        current: state.diff.current,
+        summary: state.diff.summary,
+        matches: state.diff.matches,
+        diffs: state.diff.diffs
+      } : null
     };
   }
 
@@ -446,16 +677,21 @@
   /* ---------------- 标签页切换 ---------------- */
 
   function switchTab(which) {
-    var isOrder = which === 'order';
-    els.tabOrder.classList.toggle('active', isOrder);
-    els.tabExcluded.classList.toggle('active', !isOrder);
-    els.tabOrder.setAttribute('aria-selected', String(isOrder));
-    els.tabExcluded.setAttribute('aria-selected', String(!isOrder));
-    els.orderList.hidden = !isOrder;
-    els.excludedPanel.hidden = isOrder;
+    var tabs = {
+      order: [els.tabOrder, els.orderList],
+      excluded: [els.tabExcluded, els.excludedPanel],
+      baseline: [els.tabBaseline, els.baselinePanel]
+    };
+    Object.keys(tabs).forEach(function (name) {
+      var active = name === which;
+      tabs[name][0].classList.toggle('active', active);
+      tabs[name][0].setAttribute('aria-selected', String(active));
+      tabs[name][1].hidden = !active;
+    });
   }
   els.tabOrder.addEventListener('click', function () { switchTab('order'); });
   els.tabExcluded.addEventListener('click', function () { switchTab('excluded'); });
+  els.tabBaseline.addEventListener('click', function () { switchTab('baseline'); });
 
   /* ---------------- 启动 ---------------- */
 
@@ -465,6 +701,7 @@
 
   els.html.value = SAMPLE_HTML;
   els.css.value = SAMPLE_CSS;
+  renderBaselinePanel();
 
   fetch('/analyzer.js')
     .then(function (res) {

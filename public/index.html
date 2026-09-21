@@ -58,6 +58,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" id="tab-order" role="tab" aria-selected="true" type="button">顺序 <span id="order-count" class="count">0</span></button>
         <button class="tab" id="tab-excluded" role="tab" aria-selected="false" type="button">排除与诊断 <span id="excluded-count" class="count">0</span></button>
+        <button class="tab" id="tab-baseline" role="tab" aria-selected="false" type="button">基线对比 <span id="baseline-count" class="count">0</span></button>
       </div>
       <ol id="order-list" class="order-list" aria-label="Tab 顺序"></ol>
       <div id="excluded-panel" class="excluded-panel" hidden>
@@ -65,9 +66,20 @@
         <h3>全局诊断</h3>
         <ul id="diagnostics-list" class="diagnostics-list"></ul>
       </div>
+      <div id="baseline-panel" class="baseline-panel" hidden>
+        <div class="baseline-toolbar">
+          <button id="pin-baseline-btn" class="btn primary" type="button">📌 钉当前为基线</button>
+          <button id="clear-baseline-btn" class="btn" type="button" hidden>清除基线</button>
+        </div>
+        <p id="baseline-meta" class="baseline-meta"></p>
+        <div id="diff-summary" class="diff-summary"></div>
+        <ul id="diff-list" class="diff-list"></ul>
+        <p id="diff-hint" class="diff-hint" role="status"></p>
+      </div>
     </section>
   </main>
 
+  <script src="/diff.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

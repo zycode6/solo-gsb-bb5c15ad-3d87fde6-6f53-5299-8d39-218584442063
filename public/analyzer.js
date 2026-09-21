@@ -4,7 +4,8 @@
  * 职责：
  *  1. 依据 tabindex / disabled / hidden / inert / 计算样式 / DOM 嵌套，
  *     推导文档中所有「候选可聚焦元素」的 Tab（Shift+Tab 为其逆序）顺序；
- *  2. 为每个节点生成稳定选择器，并解释被排除或顺序异常的原因；
+ *  2. 为每个节点生成稳定选择器与节点身份（唯一 id + 结构/属性指纹，
+ *     供父页面「基线对比」跨版本匹配），并解释被排除或顺序异常的原因；
  *  3. 通过 postMessage 与父页面通信：上报路线、接收高亮指令、绘制高亮框。
  *
  * 文件顶部的纯函数（parseTabIndexValue / computeOrder / buildDiagnostics）
@@ -331,6 +332,7 @@
   /**
    * 生成稳定选择器：优先唯一 #id，否则用 tag + :nth-of-type 逐级回溯。
    * 用于编辑重算后「恢复当前位置」。
+   * 注意：该选择器含位置信息，仅用于定位，不作为跨版本节点身份（见 computeIdentity）。
    */
   function stableSelector(el) {
     if (el.id) {
@@ -371,6 +373,88 @@
     return selector;
   }
 
+  /* ---------------- 节点身份（供基线对比匹配） ---------------- */
+
+  function cssEscapeIdent(s) {
+    return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
+  }
+
+  /** 指纹字符串中的值转义，避免拼接歧义 */
+  function escFp(v) {
+    return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s+/g, ' ').trim();
+  }
+
+  /** 参与指纹的关键属性（不含 tabindex/disabled/hidden 等会影响顺序或状态的属性） */
+  var FP_ATTRS = ['type', 'name', 'role', 'href', 'placeholder', 'aria-label', 'title'];
+
+  /**
+   * 结构/属性指纹：标签 + 关键属性 + 归一化文本 + 祖先链（标签与祖先 id）。
+   * 刻意不含 :nth-of-type 等位置信息——兄弟节点插入/删除不会改变既有节点的指纹。
+   */
+  function fingerprint(el) {
+    var s = el.tagName.toLowerCase();
+    for (var i = 0; i < FP_ATTRS.length; i++) {
+      var name = FP_ATTRS[i];
+      if (el.hasAttribute(name)) {
+        s += '[' + name + '="' + escFp(String(el.getAttribute(name)).slice(0, 24)) + '"]';
+      }
+    }
+    if (el.tagName === 'INPUT' && !el.hasAttribute('type')) s += '[type="text"]';
+    var text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (text) s += ' "' + escFp(text) + '"';
+    var chain = [];
+    var node = el.parentElement;
+    while (node && node.nodeType === 1) {
+      var part = node.tagName.toLowerCase();
+      if (node.id) part += '#' + node.id;
+      chain.unshift(part);
+      node = node.parentElement;
+    }
+    s += ' ^' + chain.join('>');
+    return s;
+  }
+
+  /** 纯 nth-of-type 结构路径：仅供展示与排查，不参与匹配（位置敏感，兄弟插入即漂移） */
+  function domPath(el) {
+    var parts = [];
+    var node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      var part = node.tagName.toLowerCase();
+      var parent = node.parentElement;
+      if (parent) {
+        var same = 0;
+        var idx = 0;
+        for (var i = 0; i < parent.children.length; i++) {
+          if (parent.children[i].tagName === node.tagName) {
+            same++;
+            if (parent.children[i] === node) idx = same;
+          }
+        }
+        if (same > 1) part += ':nth-of-type(' + idx + ')';
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(' > ');
+  }
+
+  /**
+   * 节点身份：
+   *  - uid ：文档内唯一 id（id 缺失或不唯一时为空）；
+   *  - fp  ：结构/属性指纹（位置无关）；
+   *  - path：nth-of-type 结构路径（仅展示用）。
+   */
+  function computeIdentity(el) {
+    var id = el.id ? String(el.id) : null;
+    var uid = null;
+    if (id) {
+      try {
+        if (document.querySelectorAll('#' + cssEscapeIdent(id)).length === 1) uid = 'id:' + id;
+      } catch (err) { /* 选择器非法时放弃 uid */ }
+    }
+    return { id: id, uid: uid, fp: fingerprint(el), path: domPath(el) };
+  }
+
   /** 扫描文档，构建候选节点数组 */
   function buildEntries() {
     entries = [];
@@ -401,6 +485,7 @@
             label: d0.css,
             text: d0.text,
             selector: stableSelector(el),
+            identity: computeIdentity(el),
             tabIndex: null,
             domIndex: i,
             interactive: false,
@@ -427,6 +512,7 @@
         label: d.css,
         text: d.text,
         selector: stableSelector(el),
+        identity: computeIdentity(el),
         tabIndex: effective,
         domIndex: i,
         interactive: natural,
@@ -446,6 +532,7 @@
         label: e.label,
         text: e.text,
         selector: e.selector,
+        identity: e.identity,
         tabIndex: e.tabIndex,
         domIndex: e.domIndex,
         interactive: e.interactive,
@@ -523,6 +610,7 @@
     try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
     var r = el.getBoundingClientRect();
     overlay.style.display = 'block';
+    overlay.style.borderStyle = 'solid';
     overlay.style.left = (r.left + window.pageXOffset - 3) + 'px';
     overlay.style.top = (r.top + window.pageYOffset - 3) + 'px';
     overlay.style.width = Math.max(r.width, 4) + 6 + 'px';
@@ -537,6 +625,41 @@
     currentStep = -1;
   }
 
+  /**
+   * 按稳定选择器高亮任意候选节点（含被排除 / 仅编程聚焦者，虚线框展示）。
+   * 供父页面「基线对比」差异项点击联动：差异节点可能不在 Tab 顺序中，
+   * 无法按步进序号定位。
+   */
+  function highlightNodeBySelector(selector) {
+    var entry = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].selector === selector) { entry = entries[i]; break; }
+    }
+    if (!entry || !entry.el || !entry.el.isConnected) {
+      post({ type: 'highlight-miss', selector: selector });
+      return;
+    }
+    ensureOverlay();
+    var el = entry.el;
+    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
+    var r = el.getBoundingClientRect();
+    overlay.style.display = 'block';
+    overlay.style.borderStyle = 'dashed';
+    overlay.style.left = (r.left + window.pageXOffset - 3) + 'px';
+    overlay.style.top = (r.top + window.pageYOffset - 3) + 'px';
+    overlay.style.width = Math.max(r.width, 4) + 6 + 'px';
+    overlay.style.height = Math.max(r.height, 4) + 6 + 'px';
+    var oi = order.indexOf(entries.indexOf(entry));
+    if (oi >= 0) {
+      badge.textContent = 'Tab ' + (oi + 1) + ' / ' + order.length;
+    } else {
+      var STATUS_BADGE = { excluded: '已排除', programmatic: '仅编程聚焦', 'not-focusable': '不可聚焦' };
+      badge.textContent = STATUS_BADGE[entry.status] || entry.status;
+    }
+    currentStep = -1;
+    post({ type: 'highlighted', step: -1, selector: selector });
+  }
+
   /* ---------------- 通信 ---------------- */
 
   window.addEventListener('message', function (ev) {
@@ -544,6 +667,8 @@
     if (d.target !== SOURCE) return;
     if (d.type === 'highlight') {
       highlightStep(d.step);
+    } else if (d.type === 'highlight-node') {
+      highlightNodeBySelector(d.selector);
     } else if (d.type === 'clear') {
       clearHighlight();
     } else if (d.type === 'recompute') {

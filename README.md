@@ -4,7 +4,8 @@
 系统依据 `tabindex`、`disabled`、`hidden`、`inert`、计算样式（`display` / `visibility`）与
 DOM 嵌套（`details`、`fieldset[disabled]` 等）推导 **Tab / Shift+Tab 焦点顺序**，
 逐步高亮节点，并解释元素被排除或顺序异常的原因。编辑内容后按**稳定选择器**恢复当前位置并重算路线，
-可一键导出「节点 / 顺序 / 诊断」JSON 报告。
+可将当前结果**钉为基线**，后续重算自动按**节点身份**对比前后路线（新增 / 移除 / 移位 / 状态切换），
+可一键导出「节点 / 顺序 / 诊断 / 基线对比」JSON 报告。
 
 ## 快速开始（Docker）
 
@@ -28,7 +29,7 @@ docker compose up --build
 ```bash
 npm install
 npm start          # http://localhost:3000
-npm test           # 焦点顺序核心算法单元测试
+npm test           # 焦点顺序核心算法 + 基线对比单元测试
 npm run smoke      # 冒烟测试（需服务已启动）
 ```
 
@@ -50,17 +51,43 @@ npm run smoke      # 冒烟测试（需服务已启动）
   非交互元素进入 Tab 顺序、`aria-hidden` 内可聚焦等）。
 - **位置恢复**：编辑重算后，按当前节点的稳定选择器（唯一 `#id` 或
   `tag:nth-of-type` 路径）在新路线中定位并恢复高亮。
+- **基线对比**：在「基线对比」标签页点击「📌 钉当前为基线」固定当前分析结果；
+  之后每次重算（手动或自动）都会与基线对比，列出：
+  - **新增 / 移除**：仅出现在一侧的节点；
+  - **移位**：仍在 Tab 顺序中但序号变化，展示前后序号（如「第 2 位 → 第 5 位」）；
+  - **状态**：「在顺序中 / 被排除 / 仅编程聚焦 / 不可聚焦」之间的切换（含前后序号）；
+  - **未匹配**：身份存在歧义（见下），无法确定对应关系的节点，明确列出而不臆测。
+
+  点击差异项可联动预览高亮：在顺序中的节点按序号高亮，被排除 / 仅编程聚焦的
+  节点以虚线框高亮；仅存在于基线中的节点会给出提示。
+- **节点身份与匹配规则**：为避免仅凭 `nth-of-type` 在兄弟节点插入后全量误判，
+  跨版本匹配不使用位置信息，而是按优先级结合两类身份：
+  1. **唯一 id**：文档内唯一的 `id`（`id:xxx`）——最强身份，文本等变化仍可识别；
+  2. **结构/属性指纹**：标签 + 关键属性（`type`/`name`/`role`/`href`/`placeholder`/
+     `aria-label`/`title`）+ 归一化文本 + 祖先链（标签与祖先 id），
+     **不含 `:nth-of-type`**，因此兄弟节点插入 / 删除不影响既有节点的身份；
+     `tabindex` / `disabled` / `hidden` 等也不参与指纹，其变化会被识别为
+     「移位 / 状态切换」而非「移除 + 新增」。
+
+  某类身份在两侧各出现恰好一次才视为匹配；在任一侧出现多次即为**歧义**，
+  对应节点被明确标记为「未匹配」，不计入新增 / 移除。
+  （`identity.path` 仍会导出 nth-of-type 结构路径，仅供排查展示，不参与匹配。）
 - **导出 JSON**：`POST /api/export` 返回 `Content-Disposition: attachment` 的报告文件；
-  接口不可用时退化为浏览器本地下载。
+  接口不可用时退化为浏览器本地下载。已钉基线时，报告包含
+  `baselineComparison` 字段：`baseline` / `current` 摘要（时间、统计、节点数）、
+  `summary`（各类差异计数）、`matches`（匹配结果及所用身份层级 `uid`/`fp`）与
+  `diffs`（逐条差异）。
 
 ## 架构
 
 ```
 server.js                 Express：静态托管 + /api/health + /api/export
 public/index.html         应用外壳（编辑器 / 预览 / 结果三栏）
-public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、导出
-public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、高亮绘制
+public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、基线面板、导出
+public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、节点身份生成、高亮绘制
+public/diff.js            基线对比纯函数：节点身份匹配（uid → 指纹 → 歧义未匹配）与差异计算
 test/analyzer.test.js     纯函数单元测试（tabindex 解析 / 排序 / 诊断）
+test/diff.test.js         基线对比单元测试（身份匹配 / 移位 / 状态切换 / 歧义）
 test/smoke.js             冒烟测试
 Dockerfile                node:20-alpine，npm install --omit=dev
 docker-compose.yml        单服务，ports 3000:3000

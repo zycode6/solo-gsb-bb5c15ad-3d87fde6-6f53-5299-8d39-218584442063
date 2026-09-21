@@ -33,6 +33,13 @@ async function check(name, fn) {
     if (!body.includes('computeOrder')) throw new Error('分析脚本内容异常');
   });
 
+  await check('GET /diff.js 可加载', async () => {
+    const res = await fetch(BASE + '/diff.js');
+    if (!res.ok) throw new Error('status ' + res.status);
+    const body = await res.text();
+    if (!body.includes('diffRoutes')) throw new Error('基线对比脚本内容异常');
+  });
+
   await check('GET /api/health', async () => {
     const res = await fetch(BASE + '/api/health');
     if (!res.ok) throw new Error('status ' + res.status);
